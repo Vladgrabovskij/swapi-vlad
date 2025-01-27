@@ -5,79 +5,98 @@ import argparse
 import json
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("SWAPI")
+logger = logging.getLogger(__name__)
 
 class SWAPIClient:
-    def __init__(self, base_url):
+    def __init__(self, base_url: str):
         self.base_url = base_url
 
-    def get_data(self, resource):
-        data_list = []
-        next_url = f"{self.base_url}{resource}/"
+    def fetch_json(self, endpoint: str) -> list:
+        url = f"{self.base_url}/{endpoint}/"
+        all_data = []
 
-        while next_url:
-            log.info(f"Fetching data from: {next_url}")
-            response = requests.get(next_url)
+        while url:
+            logger.info(f"Отримання даних з: {url}")
+            response = requests.get(url)
             response.raise_for_status()
-            payload = response.json()
+            data = response.json()
+            all_data.extend(data['results'])
+            url = data.get('next')
 
-            data_list.extend(payload['results'])
-            next_url = payload.get('next')
+        return all_data
 
-        return data_list
+class EntityProcessor:
+    def process(self, json_data: list) -> pd.DataFrame:
+        pass
 
-class SWAPIProcessor:
-    def __init__(self, client):
+class PeopleProcessor(EntityProcessor):
+    def process(self, json_data: list) -> pd.DataFrame:
+        df = pd.DataFrame(json_data)
+        df['full_name'] = df['name']
+        return df
+
+class PlanetsProcessor(EntityProcessor):
+    def process(self, json_data: list) -> pd.DataFrame:
+        df = pd.DataFrame(json_data)
+        df['population'] = pd.to_numeric(df['population'], errors='coerce')
+        return df
+
+class FilmsProcessor(EntityProcessor):
+    def process(self, json_data: list) -> pd.DataFrame:
+        df = pd.DataFrame(json_data)
+        df['title'] = df['title'].str.upper()
+        return df
+
+class SWAPIDataManager:
+    def __init__(self, client: SWAPIClient):
         self.client = client
-        self.records = {}
+        self.processors = {}
+        self.data = {}
 
-    def retrieve_data(self, resource):
-        items = self.client.get_data(resource)
-        self.records[resource] = pd.DataFrame(items)
+    def register_processor(self, endpoint: str, processor: EntityProcessor):
+        self.processors[endpoint] = processor
 
-    def filter_columns(self, resource, columns_to_remove):
-        if resource in self.records:
-            self.records[resource] = self.records[resource].drop(columns=columns_to_remove, errors='ignore')
+    def fetch_entity(self, endpoint: str):
+        json_data = self.client.fetch_json(endpoint)
+        processor = self.processors.get(endpoint)
+        if processor:
+            self.data[endpoint] = processor.process(json_data)
+        else:
+            logger.warning(f"Процесор для {endpoint} не знайдено.")
 
-    def export_to_excel(self, file_name):
-        with pd.ExcelWriter(file_name) as excel_writer:
-            for resource_name, dataframe in self.records.items():
-                dataframe.to_excel(excel_writer, sheet_name=resource_name.capitalize(), index=False)
-        log.info(f"Data successfully exported to: {file_name}")
+    def apply_filter(self, endpoint: str, columns_to_drop: list):
+        if endpoint in self.data:
+            self.data[endpoint].drop(columns=columns_to_drop, inplace=True)
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="SWAPI Data Export Tool")
-    parser.add_argument('--resources', type=str, required=True, help="Comma-separated list of SWAPI resources, e.g., people,planets")
-    parser.add_argument('--output-file', type=str, required=True, help="Name of the output Excel file")
-    parser.add_argument('--filters', type=str, help="Path to a JSON file specifying column filters")
-    return parser.parse_args()
-
-def load_filters_file(file_path):
-    if file_path:
-        try:
-            with open(file_path, 'r') as filter_file:
-                return json.load(filter_file)
-        except Exception as ex:
-            log.error(f"Error reading filters file: {ex}")
-    return {}
+    def save_to_excel(self, filename: str):
+        with pd.ExcelWriter(filename) as writer:
+            for endpoint, df in self.data.items():
+                df.to_excel(writer, sheet_name=endpoint.capitalize(), index=False)
 
 def main():
-    arguments = parse_args()
+    parser = argparse.ArgumentParser(description="SWAPI Data Manager")
+    parser.add_argument('--endpoint', required=True, help="Список сутностей через кому (наприклад, people,planets,films)")
+    parser.add_argument('--output', required=True, help="Ім'я вихідного Excel-файлу")
+    parser.add_argument('--filters', required=True, help="JSON-рядок із фільтрами для кожної сутності")
 
-    api_client = SWAPIClient(base_url="https://swapi.dev/api/")
-    data_processor = SWAPIProcessor(api_client)
+    args = parser.parse_args()
 
-    resources = arguments.resources.split(',')
-    column_filters = load_filters_file(arguments.filters)
+    client = SWAPIClient(base_url="https://swapi.dev/api/")
+    manager = SWAPIDataManager(client)
 
-    for resource in resources:
-        log.info(f"Processing resource: {resource}")
-        data_processor.retrieve_data(resource)
+    manager.register_processor("people", PeopleProcessor())
+    manager.register_processor("planets", PlanetsProcessor())
+    manager.register_processor("films", FilmsProcessor())
 
-        if resource in column_filters:
-            data_processor.filter_columns(resource, column_filters[resource])
+    for endpoint in args.endpoint.split(','):
+        manager.fetch_entity(endpoint)
 
-    data_processor.export_to_excel(arguments.output_file)
+    filters = json.loads(args.filters)
+    for endpoint, columns_to_drop in filters.items():
+        manager.apply_filter(endpoint, columns_to_drop)
+
+    manager.save_to_excel(args.output)
+    logger.info(f"Дані успішно записано у файл {args.output}")
 
 if __name__ == "__main__":
     main()

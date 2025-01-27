@@ -1,0 +1,4 @@
+{
+    "people": ["films", "species"],
+    "films": ["characters", "planets"]
+}
